@@ -1,8 +1,7 @@
-
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { money } from "@/lib/api";
 
@@ -14,7 +13,7 @@ type CartLine = {
 };
 
 type CheckoutResponse = {
-  order_uuid: string;
+  order_uuid?: string;
   reference?: string;
   checkout_url?: string;
   payment_url?: string;
@@ -37,6 +36,30 @@ const CART_KEY = "kwarihub_guest_cart";
 const TOKEN_KEY = "kwarihub_access_token";
 
 export default function CheckoutPage() {
+  return (
+    <Suspense fallback={<CheckoutLoading />}>
+      <CheckoutContent />
+    </Suspense>
+  );
+}
+
+function CheckoutLoading() {
+  return (
+    <>
+      <Header />
+      <main className="checkout-page">
+        <p className="eyebrow-pill">SECURE CHECKOUT</p>
+        <h1>Loading checkout…</h1>
+        <p className="content-lead">
+          Preparing your cart and secure payment options.
+        </p>
+      </main>
+      <Footer />
+    </>
+  );
+}
+
+function CheckoutContent() {
   const searchParams = useSearchParams();
 
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -48,6 +71,10 @@ export default function CheckoutPage() {
   const [notice, setNotice] = useState("");
   const [paymentStatus, setPaymentStatus] =
     useState<PaymentStatus | null>(null);
+
+  const reference = searchParams.get("reference");
+  const paymentReference = searchParams.get("paymentReference");
+  const paymentReturned = searchParams.get("payment");
 
   const total = useMemo(
     () =>
@@ -61,23 +88,29 @@ export default function CheckoutPage() {
 
   const loadCart = useCallback(() => {
     try {
-      const stored = JSON.parse(
+      const stored: unknown = JSON.parse(
         localStorage.getItem(CART_KEY) || "[]",
       );
 
       const safeCart: CartLine[] = Array.isArray(stored)
         ? stored
-            .filter(
-              (line: Partial<CartLine>) =>
-                typeof line.uuid === "string" &&
-                typeof line.name === "string" &&
-                Number.isFinite(Number(line.price)) &&
-                Number(line.price) >= 0 &&
-                Number.isInteger(Number(line.quantity)) &&
-                Number(line.quantity) > 0,
-            )
-            .map((line: CartLine) => ({
-              ...line,
+            .filter((line: unknown): line is CartLine => {
+              if (!line || typeof line !== "object") return false;
+
+              const item = line as Partial<CartLine>;
+
+              return (
+                typeof item.uuid === "string" &&
+                typeof item.name === "string" &&
+                Number.isFinite(Number(item.price)) &&
+                Number(item.price) >= 0 &&
+                Number.isInteger(Number(item.quantity)) &&
+                Number(item.quantity) > 0
+              );
+            })
+            .map((line) => ({
+              uuid: line.uuid,
+              name: line.name,
               price: Number(line.price),
               quantity: Number(line.quantity),
             }))
@@ -95,22 +128,18 @@ export default function CheckoutPage() {
     setReady(true);
   }, [loadCart]);
 
-  // A payment-return URL must be verified by the backend.
+  // Verify payment returns with the backend, never from URL data alone.
   useEffect(() => {
-    const reference = searchParams.get("reference");
-    const paymentReference = searchParams.get("paymentReference");
-    const paymentReturned = searchParams.get("payment");
-
     if (!reference && !paymentReference && !paymentReturned) return;
 
-    if (paymentReturned === "cancelled") {
+    if (paymentReturned?.toLowerCase() === "cancelled") {
       setNotice(
         "Payment was cancelled. Your order has not been confirmed as paid.",
       );
       return;
     }
 
-    const ref = reference || paymentReference;
+    const ref = reference ?? paymentReference ?? "";
 
     if (!ref) {
       setNotice(
@@ -133,7 +162,7 @@ export default function CheckoutPage() {
 
       try {
         const response = await fetch(
-          `${API_BASE_URL}/payments/monnify/verify/${encodeURIComponent(ref!)}`,
+          `${API_BASE_URL}/payments/monnify/verify/${encodeURIComponent(ref)}`,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -143,11 +172,17 @@ export default function CheckoutPage() {
           },
         );
 
-        const data = await response.json().catch(() => ({}));
+        const data: unknown = await response.json().catch(() => ({}));
 
         if (!response.ok) {
+          const detail =
+            data && typeof data === "object"
+              ? (data as { detail?: string; message?: string })
+              : {};
+
           throw new Error(
-            data.detail || data.message ||
+            detail.detail ||
+              detail.message ||
               "We could not verify this payment yet.",
           );
         }
@@ -161,16 +196,17 @@ export default function CheckoutPage() {
           result.payment_status || result.status || "",
         ).toUpperCase();
 
-        if (status === "PAID" || status === "SUCCESS" ||
-            status === "SUCCESSFUL") {
+        if (
+          ["PAID", "SUCCESS", "SUCCESSFUL"].includes(status)
+        ) {
           localStorage.removeItem(CART_KEY);
           setCart([]);
           setNotice(
             "Payment verified. Your order confirmation is being updated.",
           );
-        } else if (status === "FAILED" || status === "CANCELLED") {
+        } else if (["FAILED", "CANCELLED"].includes(status)) {
           setNotice(
-            "The payment was not completed. Check the order status before trying again.",
+            "The payment was not completed. Check your order status before trying again.",
           );
         } else {
           setNotice(
@@ -193,7 +229,7 @@ export default function CheckoutPage() {
     return () => {
       cancelled = true;
     };
-  }, [searchParams]);
+  }, [reference, paymentReference, paymentReturned]);
 
   function changeQuantity(uuid: string, quantity: number) {
     const next = cart
@@ -232,15 +268,6 @@ export default function CheckoutPage() {
     setSubmitting(true);
 
     try {
-      /*
-       * Backend contract:
-       * 1. Create/prepare an order from the authenticated server-side cart.
-       * 2. Initialize Monnify Hosted Checkout for that order.
-       * 3. Return order_uuid and checkout_url.
-       *
-       * The backend must calculate the payable amount from its database.
-       * Never send the browser-calculated total as the trusted amount.
-       */
       const response = await fetch(
         `${API_BASE_URL}/payments/monnify/initialize`,
         {
@@ -256,11 +283,17 @@ export default function CheckoutPage() {
         },
       );
 
-      const data = await response.json().catch(() => ({}));
+      const data: unknown = await response.json().catch(() => ({}));
 
       if (!response.ok) {
+        const detail =
+          data && typeof data === "object"
+            ? (data as { detail?: string; message?: string })
+            : {};
+
         throw new Error(
-          data.detail || data.message ||
+          detail.detail ||
+            detail.message ||
             "Could not start checkout. Please try again.",
         );
       }
@@ -274,8 +307,13 @@ export default function CheckoutPage() {
         );
       }
 
-      // Only redirect to a trusted HTTPS Monnify checkout URL.
-      const destination = new URL(checkoutUrl);
+      let destination: URL;
+
+      try {
+        destination = new URL(checkoutUrl);
+      } catch {
+        throw new Error("The payment URL returned by the server is invalid.");
+      }
 
       if (
         destination.protocol !== "https:" ||
@@ -284,7 +322,9 @@ export default function CheckoutPage() {
           destination.hostname.endsWith(".monnify.com")
         )
       ) {
-        throw new Error("The payment URL returned by the server is invalid.");
+        throw new Error(
+          "The payment URL returned by the server is invalid.",
+        );
       }
 
       window.location.assign(destination.toString());
@@ -320,9 +360,7 @@ export default function CheckoutPage() {
           <div className="form-notice" role="status">
             {notice}
             {paymentStatus?.order_status && (
-              <p>
-                Order status: {paymentStatus.order_status}
-              </p>
+              <p>Order status: {paymentStatus.order_status}</p>
             )}
           </div>
         )}
@@ -339,9 +377,7 @@ export default function CheckoutPage() {
           <div className="empty-cart">
             <span>＋</span>
             <h2>Your cart is empty</h2>
-            <p>
-              Explore the catalogue and add products you like.
-            </p>
+            <p>Explore the catalogue and add products you like.</p>
             <Link className="button-primary" href="/shop">
               Browse products →
             </Link>
@@ -368,10 +404,7 @@ export default function CheckoutPage() {
                       <button
                         type="button"
                         onClick={() =>
-                          changeQuantity(
-                            line.uuid,
-                            line.quantity - 1,
-                          )
+                          changeQuantity(line.uuid, line.quantity - 1)
                         }
                         aria-label={`Decrease quantity of ${line.name}`}
                         disabled={submitting}
@@ -384,10 +417,7 @@ export default function CheckoutPage() {
                       <button
                         type="button"
                         onClick={() =>
-                          changeQuantity(
-                            line.uuid,
-                            line.quantity + 1,
-                          )
+                          changeQuantity(line.uuid, line.quantity + 1)
                         }
                         aria-label={`Increase quantity of ${line.name}`}
                         disabled={submitting}
@@ -416,6 +446,7 @@ export default function CheckoutPage() {
 
               <div className="shipping-section">
                 <h2>Delivery details</h2>
+
                 <label htmlFor="shippingAddress">
                   Full delivery address
                 </label>
@@ -479,7 +510,7 @@ export default function CheckoutPage() {
 
               <p className="muted-note">
                 Your final amount, delivery fee, stock availability,
-                and payment status must be confirmed by KwariHub's
+                and payment status must be confirmed by KwariHub&apos;s
                 server. Your order is not paid until the backend
                 verifies the transaction.
               </p>
