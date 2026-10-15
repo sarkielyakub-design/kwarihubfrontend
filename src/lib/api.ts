@@ -1,7 +1,8 @@
+
 export const API_URL = (
   process.env.NEXT_PUBLIC_API_URL ||
   "https://kwarihub-backend-production-ea77.up.railway.app/api/v1"
-).replace(/\/$/, "");
+).replace(/\/+$/, "");
 
 export class ApiError extends Error {
   constructor(
@@ -45,14 +46,18 @@ export async function api<T>(
   let response: Response;
 
   try {
-    response = await fetch(`${API_URL}${path}`, {
+    const normalizedPath = path.startsWith("/")
+      ? path
+      : `/${path}`;
+
+    response = await fetch(`${API_URL}${normalizedPath}`, {
       ...requestOptions,
       headers,
       cache: "no-store",
     });
   } catch {
     throw new ApiError(
-      "Unable to connect to KwariHub. Please check your internet connection.",
+      "Unable to connect to KwariHub. Check your internet connection.",
       0,
     );
   }
@@ -61,8 +66,8 @@ export async function api<T>(
     const data = await response.json().catch(() => null);
 
     const detail = data?.detail;
-
-    let message = "Something went wrong. Please try again.";
+    let message =
+      data?.message || "Something went wrong. Please try again.";
 
     if (Array.isArray(detail)) {
       message = detail
@@ -93,7 +98,9 @@ export async function api<T>(
   }
 }
 
-export const money = (value: number | string | undefined | null) =>
+export const money = (
+  value: number | string | undefined | null,
+) =>
   new Intl.NumberFormat("en-NG", {
     style: "currency",
     currency: "NGN",
@@ -169,4 +176,72 @@ export type SellerOrder = {
     unit_price: number;
     total_price: number;
   }[];
+};
+
+/* -------------------------------------------------------------------------- */
+/* Vendor application                                                         */
+/* -------------------------------------------------------------------------- */
+
+export type VendorStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "suspended";
+
+export type VendorApplicationRequest = {
+  business_name: string;
+  business_description?: string | null;
+  business_phone: string;
+  business_email: string;
+  country: string;
+  state: string;
+  city: string;
+  address: string;
+};
+
+export type VendorApplication = {
+  id: number;
+  uuid: string;
+  user_id: number;
+  business_name: string;
+  business_description: string | null;
+  business_phone: string;
+  business_email: string;
+  country: string;
+  state: string;
+  city: string;
+  address: string;
+  status: VendorStatus;
+  rejection_reason: string | null;
+  admin_note: string | null;
+  reviewed_at: string | null;
+  approved_at: string | null;
+  rejected_at: string | null;
+  suspended_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/* -------------------------------------------------------------------------- */
+/* Vendor application API                                                     */
+/* -------------------------------------------------------------------------- */
+
+export const vendorApi = {
+  getApplication() {
+    return api<VendorApplication>("/seller/application");
+  },
+
+  submitApplication(payload: VendorApplicationRequest) {
+    return api<VendorApplication>("/seller/application", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateApplication(payload: Partial<VendorApplicationRequest>) {
+    return api<VendorApplication>("/seller/application", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  },
 };
