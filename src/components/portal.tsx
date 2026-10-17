@@ -2915,6 +2915,18 @@ type BankAccount = {
   created_at: string;
 };
 
+type BankOption = {
+  name: string;
+  code: string;
+};
+
+type ResolvedBankAccount = {
+  account_name: string;
+  bank_name: string;
+  account_number: string;
+  bank_code: string;
+};
+
 function Banks({
   notify,
 }: {
@@ -2929,12 +2941,215 @@ function Banks({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  if (error) {
-    return <PageState type="error">{error}</PageState>;
+  const [banks, setBanks] = useState<BankOption[]>([]);
+  const [banksLoading, setBanksLoading] = useState(false);
+  const [banksError, setBanksError] = useState("");
+
+  const [bankCode, setBankCode] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [resolvedAccount, setResolvedAccount] =
+    useState<ResolvedBankAccount | null>(null);
+
+  const [verifying, setVerifying] = useState(false);
+  const [verificationError, setVerificationError] = useState("");
+
+  const selectedBank = banks.find(
+    (bank) => bank.code === bankCode,
+  );
+
+  const resetForm = () => {
+    setBankCode("");
+    setAccountNumber("");
+    setResolvedAccount(null);
+    setVerificationError("");
+    setBanksError("");
+  };
+
+  const loadBanks = useCallback(async () => {
+    setBanksLoading(true);
+    setBanksError("");
+
+    try {
+      const result = await api<unknown>(
+        "/bank-accounts/banks",
+      );
+
+      // The backend currently returns a list of {name, code}.
+      // Also tolerate common wrapped API response formats.
+      let records: unknown = result;
+
+      if (records && typeof records === "object") {
+        const wrapped = records as Record<string, unknown>;
+
+        if (Array.isArray(wrapped.data)) {
+          records = wrapped.data;
+        } else if (Array.isArray(wrapped.responseBody)) {
+          records = wrapped.responseBody;
+        } else if (Array.isArray(wrapped.banks)) {
+          records = wrapped.banks;
+        }
+      }
+
+      if (!Array.isArray(records)) {
+        throw new Error(
+          "The bank service returned an unexpected response.",
+        );
+      }
+
+      const normalized: BankOption[] = records
+        .filter(
+          (item): item is Record<string, unknown> =>
+            Boolean(item) &&
+            typeof item === "object",
+        )
+        .map((item) => ({
+          name: String(item.name ?? "").trim(),
+          code: String(item.code ?? "").trim(),
+        }))
+        .filter((bank) => bank.name && bank.code)
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      if (normalized.length === 0) {
+        throw new Error(
+          "No banks are currently available. Please try again.",
+        );
+      }
+
+      setBanks(normalized);
+    } catch (error) {
+      setBanks([]);
+      setBanksError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load banks from Monnify.",
+      );
+    } finally {
+      setBanksLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open && banks.length === 0 && !banksLoading) {
+      void loadBanks();
+    }
+  }, [open, banks.length, banksLoading, loadBanks]);
+
+  function changeBank(value: string) {
+    setBankCode(value);
+    setResolvedAccount(null);
+    setVerificationError("");
   }
 
-  if (!data) {
-    return <PageState type="loading" />;
+  function changeAccountNumber(value: string) {
+    const digitsOnly = value.replace(/\D/g, "").slice(0, 10);
+
+    setAccountNumber(digitsOnly);
+    setResolvedAccount(null);
+    setVerificationError("");
+  }
+
+  async function verifyAccount() {
+    if (verifying || busy) return;
+
+    if (!bankCode) {
+      setVerificationError("Please select your bank.");
+      return;
+    }
+
+    if (!/^\d{10}$/.test(accountNumber)) {
+      setVerificationError(
+        "Enter a valid 10-digit Nigerian account number.",
+      );
+      return;
+    }
+
+    setVerifying(true);
+    setVerificationError("");
+    setResolvedAccount(null);
+
+    try {
+      const result = await api<ResolvedBankAccount>(
+        "/bank-accounts/resolve",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            bank_code: bankCode,
+            account_number: accountNumber,
+          }),
+        },
+      );
+
+      if (
+        !result ||
+        typeof result.account_name !== "string" ||
+        !result.account_name.trim() ||
+        result.account_number !== accountNumber ||
+        result.bank_code !== bankCode
+      ) {
+        throw new Error(
+          "We could not confirm the account details. Please try again.",
+        );
+      }
+
+      setResolvedAccount({
+        account_name: result.account_name.trim(),
+        bank_name: result.bank_name || selectedBank?.name || "",
+        account_number: result.account_number,
+        bank_code: result.bank_code,
+      });
+    } catch (error) {
+      setVerificationError(
+        error instanceof Error
+          ? error.message
+          : "Account verification failed. Please check your details.",
+      );
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  async function addAccount(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
+    if (busy) return;
+
+    if (!resolvedAccount) {
+      setVerificationError(
+        "Verify your account before saving it.",
+      );
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      // The backend verifies the account again before saving.
+      await api("/bank-accounts", {
+        method: "POST",
+        body: JSON.stringify({
+          bank_code: resolvedAccount.bank_code,
+          account_number: resolvedAccount.account_number,
+        }),
+      });
+
+      await load();
+
+      setOpen(false);
+      resetForm();
+
+      notify("Verified bank account added successfully.");
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Could not save the bank account.",
+        "error",
+      );
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function makeDefault(id: string) {
@@ -2977,64 +3192,28 @@ function Banks({
     }
   }
 
-  async function addAccount(
-    event: FormEvent<HTMLFormElement>,
-  ) {
-    event.preventDefault();
+  if (error) {
+    return <PageState type="error">{error}</PageState>;
+  }
 
-    if (busy) return;
-
-    const form = new FormData(event.currentTarget);
-    const bankCode = String(form.get("bank_code") ?? "").trim();
-    const accountNumber = String(
-      form.get("account_number") ?? "",
-    ).trim();
-
-    if (!bankCode || !/^\d{10}$/.test(accountNumber)) {
-      notify(
-        "Enter a bank code and a valid 10-digit account number.",
-        "error",
-      );
-      return;
-    }
-
-    setBusy(true);
-
-    try {
-      await api("/bank-accounts", {
-        method: "POST",
-        body: JSON.stringify({
-          bank_code: bankCode,
-          account_number: accountNumber,
-        }),
-      });
-
-      await load();
-      setOpen(false);
-      notify("Bank account added.");
-    } catch (error) {
-      notify(
-        error instanceof Error
-          ? error.message
-          : "Could not add account.",
-        "error",
-      );
-    } finally {
-      setBusy(false);
-    }
+  if (!data) {
+    return <PageState type="loading" />;
   }
 
   return (
     <>
       <div className="toolbar">
         <p className="muted">
-          Saved accounts for your KwariHub profile.
+          Manage your verified bank accounts for vendor payouts.
         </p>
 
         <button
           type="button"
           className="button primary"
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            resetForm();
+            setOpen(true);
+          }}
         >
           + Add account
         </button>
@@ -3042,7 +3221,7 @@ function Banks({
 
       {data.length === 0 ? (
         <PageState type="empty">
-          Add a bank account for faster payout setup.
+          Add a bank account to prepare for vendor payouts.
         </PageState>
       ) : (
         <div className="bank-grid">
@@ -3094,42 +3273,135 @@ function Banks({
         <Modal
           title="Add bank account"
           onClose={() => {
-            if (!busy) setOpen(false);
+            if (!busy && !verifying) {
+              setOpen(false);
+              resetForm();
+            }
           }}
         >
           <form className="form-grid" onSubmit={addAccount}>
-            <label>
-              Bank code
-              <input
-                name="bank_code"
+            <label className="full">
+              Bank name
+              <select
+                value={bankCode}
+                onChange={(event) => changeBank(event.target.value)}
                 required
-                placeholder="e.g. 058"
-              />
+                disabled={banksLoading || verifying || busy}
+              >
+                <option value="">
+                  {banksLoading
+                    ? "Loading banks..."
+                    : "Select your bank"}
+                </option>
+
+                {banks.map((bank) => (
+                  <option key={bank.code} value={bank.code}>
+                    {bank.name}
+                  </option>
+                ))}
+              </select>
             </label>
 
-            <label>
+            {banksError && (
+              <div className="notice error-notice full">
+                <p>{banksError}</p>
+
+                <button
+                  type="button"
+                  className="button ghost"
+                  onClick={() => void loadBanks()}
+                  disabled={banksLoading}
+                >
+                  {banksLoading ? "Loading..." : "Retry loading banks"}
+                </button>
+              </div>
+            )}
+
+            <label className="full">
               Account number
               <input
-                name="account_number"
+                type="text"
                 inputMode="numeric"
+                autoComplete="off"
+                value={accountNumber}
+                onChange={(event) =>
+                  changeAccountNumber(event.target.value)
+                }
+                placeholder="Enter your 10-digit account number"
                 pattern="[0-9]{10}"
                 minLength={10}
                 maxLength={10}
                 required
+                disabled={verifying || busy}
               />
+              <small className="muted">
+                Enter the account number linked to your selected bank.
+              </small>
             </label>
 
-            <p className="muted full">
-              The backend should resolve the bank and account name,
-              and verify the account before enabling withdrawals.
-            </p>
+            <div className="full">
+              <button
+                type="button"
+                className="button ghost"
+                onClick={() => void verifyAccount()}
+                disabled={
+                  banksLoading ||
+                  Boolean(banksError) ||
+                  !bankCode ||
+                  !/^\d{10}$/.test(accountNumber) ||
+                  verifying ||
+                  busy
+                }
+              >
+                {verifying
+                  ? "Verifying account..."
+                  : "Verify account"}
+              </button>
+            </div>
+
+            {verificationError && (
+              <div className="notice error-notice full" role="alert">
+                {verificationError}
+              </div>
+            )}
+
+            {resolvedAccount && (
+              <div className="notice full">
+                <strong>Account verified</strong>
+
+                <div className="metric-list">
+                  <p>
+                    Bank
+                    <b>{resolvedAccount.bank_name}</b>
+                  </p>
+
+                  <p>
+                    Account name
+                    <b>{resolvedAccount.account_name}</b>
+                  </p>
+
+                  <p>
+                    Account number
+                    <b>{resolvedAccount.account_number}</b>
+                  </p>
+                </div>
+
+                <small>
+                  Confirm that the bank and account name belong to you
+                  before saving this account.
+                </small>
+              </div>
+            )}
 
             <div className="modal-actions full">
               <button
                 type="button"
                 className="button ghost"
-                onClick={() => setOpen(false)}
-                disabled={busy}
+                onClick={() => {
+                  setOpen(false);
+                  resetForm();
+                }}
+                disabled={busy || verifying}
               >
                 Cancel
               </button>
@@ -3137,9 +3409,14 @@ function Banks({
               <button
                 type="submit"
                 className="button primary"
-                disabled={busy}
+                disabled={
+                  busy ||
+                  verifying ||
+                  !resolvedAccount ||
+                  Boolean(banksError)
+                }
               >
-                {busy ? "Adding…" : "Add account"}
+                {busy ? "Saving account..." : "Save bank account"}
               </button>
             </div>
           </form>
