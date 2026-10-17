@@ -174,28 +174,30 @@ export function Portal({
     );
   }
 
-  if (!application || application.status !== "approved") {
-    return (
-      <VendorApplicationPage
-        user={user}
-        application={application}
-        applicationMissing={applicationMissing}
-        onApplicationSaved={(saved) => {
-          setApplication(saved);
-          setApplicationMissing(false);
+  const vendorStatus = String(application?.status ?? "")
+  .trim()
+  .toLowerCase();
 
-          notify(
-            saved.status === "approved"
-              ? "Your vendor account is approved."
-              : "Vendor application saved successfully.",
-          );
-        }}
-        onLogout={onLogout}
-        toast={toast}
-      />
-    );
-  }
-
+if (!application || vendorStatus !== "approved") {
+  return (
+    <VendorApplicationPage
+      user={user}
+      application={application}
+      applicationMissing={applicationMissing}
+      onApplicationSaved={(saved) => {
+        setApplication(saved);
+        setApplicationMissing(false);
+        notify(
+          String(saved.status).trim().toLowerCase() === "approved"
+            ? "Your vendor account is approved."
+            : "Vendor application saved successfully.",
+        );
+      }}
+      onLogout={onLogout}
+      toast={toast}
+    />
+  );
+}
   return (
     <div className="portal">
       <aside className={mobile ? "sidebar open" : "sidebar"}>
